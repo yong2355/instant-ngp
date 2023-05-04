@@ -132,24 +132,8 @@ __global__ void dequantize(
 	int range = 255;
 	if(i==0){printf("start dequantize!!!!\n");}
 	
-	//encoded_positions[i] = (T)((float)encoded_positions[i]*mlp_scale*(*scale_factor/range));
-	encoded_positions[i] = (T)((float)encoded_positions[i]*(*scale_factor/range));
-}
-template <typename T>
-__global__ void truncate_overflow(
-	const uint32_t num_elements,
-	T* __restrict__ encoded_positions,
-	float* scale_factor,
-	float mlp_scale
-) {
-	const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
-	if(i>=num_elements)return;
-	int range = 255;
-	int max_int = 127;
-	int min_int = -128;
-	if(i==0){printf("start truncate!!!!\n");}
-	if((float)encoded_positions[i]>=max_int*(*scale_factor)*mlp_scale/range){encoded_positions[i] = max_int*(*scale_factor)*mlp_scale/range;}
-	if((float)encoded_positions[i]<=min_int*(*scale_factor)*mlp_scale/range){encoded_positions[i] = min_int*(*scale_factor)*mlp_scale/range;}
+	encoded_positions[i] = (T)((float)encoded_positions[i]*mlp_scale*(*scale_factor/range));
+	//encoded_positions[i] = (T)((float)encoded_positions[i]*(*scale_factor/range));
 }
 
 template <typename T>
@@ -196,7 +180,7 @@ public:
 		);
 		std::cout << "line after m_pos_encoding->inference_mixed_precision in inference_mixed_precision_impl fn of nerf_network.h\n";
 
-		/*std::cout << "Start Quantize_1!!\n";
+		std::cout << "Start Quantize_1!!\n";
 		cudaDeviceSynchronize();
 		T* target1 = density_network_input.data();
 		float* scale_factor1;
@@ -210,6 +194,7 @@ public:
 		quantize<T><<<tt, 1024, 0>>>(batch_size, target1, scale_factor1);
 		cudaDeviceSynchronize();
 		//cudaFree(scale_factor1);*/
+		//float float_min = -10000;
 
 		std::cout << "line before m_density_network->inference_mixed_precision in inference_mixed_precision_impl fn of nerf_network.h\n";
 		m_density_network->inference_mixed_precision(stream, density_network_input, density_network_output, use_inference_params);
@@ -227,7 +212,7 @@ public:
 		);
 		std::cout << "line after m_dir_encoding->inference_mixed_precision in inference_mixed_precision_impl fn of nerf_network.h\n";
 
-		cudaDeviceSynchronize();
+		/*cudaDeviceSynchronize();
 		T* temp=(T*)malloc(batch_size*sizeof(__half)*16);
 		cudaMemcpy(temp,dir_out.data(),batch_size*32,cudaMemcpyDeviceToHost);
 		float max = (float)temp[0];
@@ -254,10 +239,9 @@ public:
 		}
 		printf("max is %f, min is %f, mean is %f\n",max,min,(sum/(16*batch_size)));
 		printf("histo is %d, %d, %d, %d, %d, %d, %d, %d, %d, %d\n",histo[0],histo[1],histo[2],histo[3],histo[4],histo[5],histo[6],histo[7],histo[8],histo[9]);
-		
-		free(temp);
+		free(temp);*/
 
-		/*float density_network_scales = 0.004486083984375 * 0.006870269775390625;	//int8
+		float density_network_scales = 0.004486083984375 * 0.006870269775390625;	//int8
 		//float density_network_scales = 0.035888671875*0.054962158203125;	//test(*2.5)
 		//float density_network_scales = 0.004833221435546875 * 0.00616455078125;	//31k int8
 		//float density_network_scales = 0.07623291015625 * 0.1168212890625;			//int4
@@ -266,19 +250,18 @@ public:
 		T* target3 = density_network_output.data();
 		dequantize<T><<<tt1,1024,0>>>(16*batch_size,target3, scale_factor1,density_network_scales);
 		cudaDeviceSynchronize();
-		//truncate_overflow<T><<<tt1, 1024, 0>>>(16*batch_size, target3, scale_factor1, density_network_scales);
 		//cudaDeviceSynchronize();
 		cudaFree(scale_factor1);
 
-		std::cout << "Start Quantize_2!!\n";
+		/*std::cout << "Start Quantize_2!!\n";
 		T* target2 = rgb_network_input.data();
 		float* scale_factor2;
 		cudaMalloc(&scale_factor2, 4);
 		cudaMemcpy(scale_factor2,&float_min,4,cudaMemcpyHostToDevice);
-		//uint32_t dg = (m_rgb_network_input_width*batch_size + 1024 - 1) / 1024;
+		uint32_t dg = (m_rgb_network_input_width*batch_size + 1024 - 1) / 1024;
 		get_scale<T><<<dg, 1024>>>(batch_size, target2, scale_factor2);
 		cudaDeviceSynchronize();
-		//const dim3 tt = { dg, 1, 1 };
+		const dim3 tt = { dg, 1, 1 };
 		quantize<T><<<tt, 1024, 0>>>(batch_size, target2, scale_factor2);
 		cudaDeviceSynchronize();
 		//cudaFree(scale_factor2);*/
@@ -295,7 +278,6 @@ public:
 		const dim3 tt2 = { dg2, 1, 1 };
 		dequantize<T><<<tt2,1024,0>>>(3*batch_size,rgb_network_output.data(),scale_factor2,rgb_network_scales);
 		cudaDeviceSynchronize();
-		//truncate_overflow<T><<<tt2, 1024, 0>>>(3*batch_size, rgb_network_output.data(), scale_factor2, rgb_network_scales);
 		//cudaDeviceSynchronize();
 		cudaFree(scale_factor2);*/
 		tcnn::linear_kernel(extract_density<T>, 0, stream,	//density, rgbd stride are 1

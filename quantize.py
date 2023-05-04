@@ -13,12 +13,12 @@ def init_model(mode, config, params):
  offset = 0
  if mode == 'nerf':
   print("*****density network")
-  model['density_network'], newparams1 = init_mlp(mode, config['network'], params, offset)
+  model['density_network'], newparams1 = init_mlp(mode, config['network'], params, offset, 0)
   offset += model['density_network']['n_params']
   print("WonRaeItDon Print")
   print(model['density_network']['n_params'])
   print("*****rgb network")
-  model['rgb_network'], newparams2 = init_mlp(mode, config['rgb_network'], newparams1, offset)
+  model['rgb_network'], newparams2 = init_mlp(mode, config['rgb_network'], newparams1, offset,1)
   offset += model['rgb_network']['n_params']
   print("WonRaeItDon Print")
   print(model['rgb_network']['n_params'])
@@ -34,7 +34,7 @@ def init_model(mode, config, params):
   offset += model['encoding']['n_params']
  return model, newparams3, scales
 
-def init_mlp(mode, network_config, params, pointer):
+def init_mlp(mode, network_config, params, pointer,net):
  network = dict()
  #1. init hyperparams from the config
  # FIXME: input_width/output_width are set implicitly
@@ -125,10 +125,12 @@ def init_mlp(mode, network_config, params, pointer):
   print(max(params[pointer:pointer+n_params_in_lev]))
   scale_input = np.float16(2*max(params[pointer:pointer+n_params_in_lev])/q_range) if max(params[pointer:pointer+n_params_in_lev]) > -min(params[pointer:pointer+n_params_in_lev]) else np.float16(-2*min(params[pointer:pointer+n_params_in_lev])/q_range)
   quan_input = np.clip(np.round(newparams[pointer:pointer+n_params_in_lev]/scale_input),-128,127)
-  newparams[pointer:pointer+n_params_in_lev]=quan_input
+  if net == 0: 
+   newparams[pointer:pointer+n_params_in_lev]=quan_input
+  else:        
+   newparams[pointer:pointer+n_params_in_lev]=quan_input*scale_input
   print("SSSSS")
   print(newparams[pointer:pointer+n_params_in_lev])
-  #newparams[pointer:pointer+n_params_in_lev]=quan_input*scale_input
   scales.append(scale_input)
   pointer += n_params_in_lev
                                                                                                                                                                                                                                                                                                                                                                                                                                                            
@@ -148,8 +150,10 @@ def init_mlp(mode, network_config, params, pointer):
    print(max(params[pointer:pointer+n_params_in_lev]))
    scale_hidden = np.float16(2*max(params[pointer:pointer+n_params_in_lev])/q_range) if max(params[pointer:pointer+n_params_in_lev]) > -min(params[pointer:pointer+n_params_in_lev]) else np.float16(-2*min(params[pointer:pointer+n_params_in_lev])/q_range)
    quan_hidden = np.clip(np.round(newparams[pointer:pointer+n_params_in_lev]/scale_hidden),-128,127)
-   newparams[pointer:pointer+n_params_in_lev]=quan_hidden
-   #newparams[pointer:pointer+n_params_in_lev]=quan_hidden*scale_hidden
+   if net == 0:
+    newparams[pointer:pointer+n_params_in_lev]=quan_hidden
+   else:
+    newparams[pointer:pointer+n_params_in_lev]=quan_hidden*scale_hidden
    print("SSSSS")
    print(newparams[pointer:pointer+n_params_in_lev])
    scales.append(scale_hidden)
@@ -170,8 +174,10 @@ def init_mlp(mode, network_config, params, pointer):
   print(max(params[pointer:pointer+n_params_in_lev]))
   scale_output = np.float16(2*max(params[pointer:pointer+n_params_in_lev])/q_range) if max(params[pointer:pointer+n_params_in_lev]) > -min(params[pointer:pointer+n_params_in_lev]) else np.float16(-2*min(params[pointer:pointer+n_params_in_lev])/q_range)
   quan_output = np.clip(np.round(newparams[pointer:pointer+n_params_in_lev]/scale_output),-128,127)
-  newparams[pointer:pointer+n_params_in_lev]=quan_output
-  #newparams[pointer:pointer+n_params_in_lev]=quan_output*scale_output
+  if net == 0:
+   newparams[pointer:pointer+n_params_in_lev]=quan_output
+  else:
+   newparams[pointer:pointer+n_params_in_lev]=quan_output*scale_output
   print("SSSSS")
   print(newparams[pointer:pointer+n_params_in_lev])
   scales.append(scale_output)
@@ -611,9 +617,9 @@ def main():
   #print(v)
 
  #q_model_fpath = f'./fox_temp.msgpack' #다 dequantize해서 돌려줌
- q_model_fpath = f'./fox_int8.msgpack'  #hash는 dequantize해서 돌려주고, mlp는 int로
+ #q_model_fpath = f'./fox_int8.msgpack'  #hash는 dequantize해서 돌려주고, mlp는 int로
  #q_model_fpath = f'./fox_temp_int4.msgpack'
- #q_model_fpath = f'./fox_new.msgpack'
+ q_model_fpath = f'./fox_new2.msgpack'
 
  utils.save_msgpack(q_model_fpath, config)
  new_config = utils.load_msgpack(q_model_fpath)
