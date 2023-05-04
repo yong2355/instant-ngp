@@ -23,7 +23,7 @@
 #include <tiny-cuda-nn/gpu_memory.h>
 #include <tiny-cuda-nn/multi_stream.h>
 #include <tiny-cuda-nn/network.h>
-
+#include <iostream>
 #include <tiny-cuda-nn/network_with_input_encoding.h>
 
 NGP_NAMESPACE_BEGIN
@@ -74,6 +74,85 @@ __global__ void add_density_gradient(
 }
 
 template <typename T>
+__device__ float myownmax(float* address, float val)
+{
+	int* address_as_int = (int*)address;
+	int old = *address_as_int, assumed;
+	do{
+		assumed = old;
+		old = atomicCAS(address_as_int, assumed, __float_as_int(fmaxf(val, __int_as_float(assumed))));
+	}while(assumed != old);
+	return __int_as_float(old);
+}
+template <typename T>
+__global__ void get_scale(
+	const uint32_t num_elements,
+	T* __restrict__ encoded_positions,
+	float* scale_factor
+) {
+	uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+	if(i==0){printf("start get_scale!!!!\n");}
+	if(i>=32*num_elements)return;
+	float max1 = (float)encoded_positions[0];
+	float min1 = (float)encoded_positions[0];
+	while(i<32*num_elements){
+		if((float)encoded_positions[i]>max1){max1 = (float)encoded_positions[i];}
+		if((float)encoded_positions[i]<min1){min1 = (float)encoded_positions[i];}
+		i += blockDim.x*gridDim.x;
+	}
+	float scale = (max1>-min1) ? 2*max1 : -2*min1;
+	myownmax<T>(scale_factor, scale);
+}
+template <typename T>
+__global__ void quantize(
+	const uint32_t num_elements,
+	T* __restrict__ encoded_positions,
+	float* scale_factor
+) {
+	const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+	if(i>=num_elements*32)return;
+	int max_int = 127;
+	int min_int = -128;
+	int range = 255;
+	if(i==0){printf("start quantize!!!!\n");}
+	
+	float x = floorf(((float)encoded_positions[i])/(*scale_factor)*range + 0.5f);
+	encoded_positions[i] = (T)((x >= max_int) ? max_int : (x <= min_int ? min_int : x));
+	//encoded_positions[i] = (T)((x >= max_int) ? max_int*(*scale_factor)/range : (x <= min_int ? min_int*(*scale_factor)/range : x*(*scale_factor)/range));
+}
+template <typename T>
+__global__ void dequantize(
+	const uint32_t num_elements,
+	T* __restrict__ encoded_positions,
+	float* scale_factor,
+	float mlp_scale
+) {
+	const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+	if(i>=num_elements)return;
+	int range = 255;
+	if(i==0){printf("start dequantize!!!!\n");}
+	
+	//encoded_positions[i] = (T)((float)encoded_positions[i]*mlp_scale*(*scale_factor/range));
+	encoded_positions[i] = (T)((float)encoded_positions[i]*(*scale_factor/range));
+}
+template <typename T>
+__global__ void truncate_overflow(
+	const uint32_t num_elements,
+	T* __restrict__ encoded_positions,
+	float* scale_factor,
+	float mlp_scale
+) {
+	const uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+	if(i>=num_elements)return;
+	int range = 255;
+	int max_int = 127;
+	int min_int = -128;
+	if(i==0){printf("start truncate!!!!\n");}
+	if((float)encoded_positions[i]>=max_int*(*scale_factor)*mlp_scale/range){encoded_positions[i] = max_int*(*scale_factor)*mlp_scale/range;}
+	if((float)encoded_positions[i]<=min_int*(*scale_factor)*mlp_scale/range){encoded_positions[i] = min_int*(*scale_factor)*mlp_scale/range;}
+}
+
+template <typename T>
 class NerfNetwork : public tcnn::Network<float, T> {
 public:
 	using json = nlohmann::json;
@@ -101,33 +180,125 @@ public:
 	virtual ~NerfNetwork() { }
 
 	void inference_mixed_precision_impl(cudaStream_t stream, const tcnn::GPUMatrixDynamic<float>& input, tcnn::GPUMatrixDynamic<T>& output, bool use_inference_params = true) override {
+		std::cout << "we executed inference_mixed_precision_impl of nerf_network.h\n";
 		uint32_t batch_size = input.n();
 		tcnn::GPUMatrixDynamic<T> density_network_input{m_pos_encoding->padded_output_width(), batch_size, stream, m_pos_encoding->preferred_output_layout()};
 		tcnn::GPUMatrixDynamic<T> rgb_network_input{m_rgb_network_input_width, batch_size, stream, m_dir_encoding->preferred_output_layout()};
 
 		tcnn::GPUMatrixDynamic<T> density_network_output = rgb_network_input.slice_rows(0, m_density_network->padded_output_width());
 		tcnn::GPUMatrixDynamic<T> rgb_network_output{output.data(), m_rgb_network->padded_output_width(), batch_size, output.layout()};
-
+		std::cout << "line before m_pos_encoding->inference_mixed_precision in inference_mixed_precision_impl fn of nerf_network.h\n";
 		m_pos_encoding->inference_mixed_precision(
 			stream,
 			input.slice_rows(0, m_pos_encoding->input_width()),
 			density_network_input,
 			use_inference_params
 		);
+		std::cout << "line after m_pos_encoding->inference_mixed_precision in inference_mixed_precision_impl fn of nerf_network.h\n";
 
+		/*std::cout << "Start Quantize_1!!\n";
+		cudaDeviceSynchronize();
+		T* target1 = density_network_input.data();
+		float* scale_factor1;
+		cudaMalloc(&scale_factor1, 4);
+		float float_min = -10000;
+		cudaMemcpy(scale_factor1,&float_min,4,cudaMemcpyHostToDevice);
+		uint32_t dg = (32*batch_size + 1024 - 1) / 1024;
+		get_scale<T><<<dg, 1024>>>(batch_size, target1, scale_factor1);
+		cudaDeviceSynchronize();
+		const dim3 tt = { dg, 1, 1 };
+		quantize<T><<<tt, 1024, 0>>>(batch_size, target1, scale_factor1);
+		cudaDeviceSynchronize();
+		//cudaFree(scale_factor1);*/
+
+		std::cout << "line before m_density_network->inference_mixed_precision in inference_mixed_precision_impl fn of nerf_network.h\n";
 		m_density_network->inference_mixed_precision(stream, density_network_input, density_network_output, use_inference_params);
+		cudaDeviceSynchronize();
+		std::cout << "line after m_density_network->inference_mixed_precision in inference_mixed_precision_impl fn of nerf_network.h\n";
 
 		auto dir_out = rgb_network_input.slice_rows(m_density_network->padded_output_width(), m_dir_encoding->padded_output_width());
+
+		std::cout << "line before m_dir_encoding->inference_mixed_precision in inference_mixed_precision_impl fn of nerf_network.h\n";
 		m_dir_encoding->inference_mixed_precision(
 			stream,
 			input.slice_rows(m_dir_offset, m_dir_encoding->input_width()),
 			dir_out,
 			use_inference_params
 		);
+		std::cout << "line after m_dir_encoding->inference_mixed_precision in inference_mixed_precision_impl fn of nerf_network.h\n";
 
+		cudaDeviceSynchronize();
+		T* temp=(T*)malloc(batch_size*sizeof(__half)*16);
+		cudaMemcpy(temp,dir_out.data(),batch_size*32,cudaMemcpyDeviceToHost);
+		float max = (float)temp[0];
+		float min = (float)temp[0];
+		float sum = (float)temp[0];
+		for(int i=1;i<16*batch_size;i++){
+			if(max<(float)temp[i]){max=(float)temp[i];}
+			if(min>(float)temp[i]){min=(float)temp[i];}
+			sum = sum+(float)temp[i];
+		}
+		float interval = (float)(max-min)/10;
+		int histo[10] = {0,};
+		for(int i=0;i<16*batch_size;i++){
+			if((float)temp[i]<min + interval){histo[0]++;}
+			else if((float)temp[i]<min + interval*2){histo[1]++;}
+			else if((float)temp[i]<min + interval*3){histo[2]++;}
+			else if((float)temp[i]<min + interval*4){histo[3]++;}
+			else if((float)temp[i]<min + interval*5){histo[4]++;}
+			else if((float)temp[i]<min + interval*6){histo[5]++;}
+			else if((float)temp[i]<min + interval*7){histo[6]++;}
+			else if((float)temp[i]<min + interval*8){histo[7]++;}
+			else if((float)temp[i]<min + interval*9){histo[8]++;}
+			else {histo[9]++;}
+		}
+		printf("max is %f, min is %f, mean is %f\n",max,min,(sum/(16*batch_size)));
+		printf("histo is %d, %d, %d, %d, %d, %d, %d, %d, %d, %d\n",histo[0],histo[1],histo[2],histo[3],histo[4],histo[5],histo[6],histo[7],histo[8],histo[9]);
+		
+		free(temp);
+
+		/*float density_network_scales = 0.004486083984375 * 0.006870269775390625;	//int8
+		//float density_network_scales = 0.035888671875*0.054962158203125;	//test(*2.5)
+		//float density_network_scales = 0.004833221435546875 * 0.00616455078125;	//31k int8
+		//float density_network_scales = 0.07623291015625 * 0.1168212890625;			//int4
+		uint32_t dg1 = (16*batch_size + 1024 - 1) / 1024;
+		const dim3 tt1 = { dg1, 1, 1 };
+		T* target3 = density_network_output.data();
+		dequantize<T><<<tt1,1024,0>>>(16*batch_size,target3, scale_factor1,density_network_scales);
+		cudaDeviceSynchronize();
+		//truncate_overflow<T><<<tt1, 1024, 0>>>(16*batch_size, target3, scale_factor1, density_network_scales);
+		//cudaDeviceSynchronize();
+		cudaFree(scale_factor1);
+
+		std::cout << "Start Quantize_2!!\n";
+		T* target2 = rgb_network_input.data();
+		float* scale_factor2;
+		cudaMalloc(&scale_factor2, 4);
+		cudaMemcpy(scale_factor2,&float_min,4,cudaMemcpyHostToDevice);
+		//uint32_t dg = (m_rgb_network_input_width*batch_size + 1024 - 1) / 1024;
+		get_scale<T><<<dg, 1024>>>(batch_size, target2, scale_factor2);
+		cudaDeviceSynchronize();
+		//const dim3 tt = { dg, 1, 1 };
+		quantize<T><<<tt, 1024, 0>>>(batch_size, target2, scale_factor2);
+		cudaDeviceSynchronize();
+		//cudaFree(scale_factor2);*/
+
+		std::cout << "line before m_rgb_network->inference_mixed_precision in inference_mixed_precision_impl fn of nerf_network.h\n";
 		m_rgb_network->inference_mixed_precision(stream, rgb_network_input, rgb_network_output, use_inference_params);
-
-		tcnn::linear_kernel(extract_density<T>, 0, stream,
+		std::cout << "line after m_rgb_network->inference_mixed_precision in inference_mixed_precision_impl fn of nerf_network.h\n";
+		
+		/*float rgb_network_scales = 0.007289886474609375 * 0.00589752197265625 * 0.0080413818359375;	//int8
+		//float rgb_network_scales = 0.058319091796875*0.04718017578125*0.0643310546875;	//test
+		//float rgb_network_scales = 0.00579071044921875 * 0.00600433349609375 * 0.00770568847656250;	//31k int8
+		//float rgb_network_scales = 0.12396240234375 * 0.10028076171875 * 0.13671875;				//int4
+		uint32_t dg2 = (3*batch_size + 1024 - 1) / 1024;
+		const dim3 tt2 = { dg2, 1, 1 };
+		dequantize<T><<<tt2,1024,0>>>(3*batch_size,rgb_network_output.data(),scale_factor2,rgb_network_scales);
+		cudaDeviceSynchronize();
+		//truncate_overflow<T><<<tt2, 1024, 0>>>(3*batch_size, rgb_network_output.data(), scale_factor2, rgb_network_scales);
+		//cudaDeviceSynchronize();
+		cudaFree(scale_factor2);*/
+		tcnn::linear_kernel(extract_density<T>, 0, stream,	//density, rgbd stride are 1
 			batch_size,
 			density_network_output.layout() == tcnn::AoS ? density_network_output.stride() : 1,
 			output.layout() == tcnn::AoS ? padded_output_width() : 1,
@@ -474,7 +645,6 @@ public:
 			{"rgb_network", m_rgb_network->hyperparams()},
 		};
 	}
-
 private:
 	std::shared_ptr<tcnn::Network<T>> m_density_network;
 	std::shared_ptr<tcnn::Network<T>> m_rgb_network;
